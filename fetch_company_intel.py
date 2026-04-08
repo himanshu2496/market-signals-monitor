@@ -6,9 +6,9 @@ Posts to #market-signals-intel via Slack Incoming Webhook.
 
 Modes:
   --mode alerts   Every 2 hours: priority tier (10 companies) only.
-                  Sources: Google News RSS + NewsAPI
+                  Sources: Google News RSS + NewsAPI + LinkedIn (via Google) + Indeed RSS
   --mode digest   Daily 9am UTC: all 60 companies.
-                  Sources: Google News RSS + NewsAPI + PR Newswire RSS + SEC EDGAR
+                  Sources: Google News RSS + NewsAPI + PR Newswire RSS + SEC EDGAR + LinkedIn + Indeed RSS
 
 Usage:
   python fetch_company_intel.py --mode alerts
@@ -157,6 +157,61 @@ def fetch_google_rss_jobs(company: str, lookback_minutes: int) -> list[dict]:
     articles = fetch_google_rss(query, lookback_minutes)
     for a in articles:
         a["signal_type"] = "executive"
+    return articles
+
+
+def fetch_linkedin_via_google(company: str, lookback_minutes: int) -> list[dict]:
+    """
+    Surface LinkedIn posts and articles indexed by Google News.
+    Uses site:linkedin.com to narrow results to LinkedIn content.
+    Note: only publicly visible LinkedIn posts appear in Google's index.
+    """
+    # Exec posts and company page updates on LinkedIn
+    query = f'"{company}" site:linkedin.com'
+    articles = fetch_google_rss(query, lookback_minutes)
+    for a in articles:
+        a["signal_type"] = "linkedin"
+        a["origin"] = "linkedin"
+        a["source"] = "LinkedIn"
+    log.info("  LinkedIn (Google-indexed): %d results for %s", len(articles), company)
+    return articles
+
+
+def fetch_indeed_jobs(company: str, lookback_minutes: int, timeout: int = 15) -> list[dict]:
+    """
+    Fetch recent job postings from Indeed RSS for a company.
+    Indeed RSS: https://www.indeed.com/rss?q={query}&sort=date
+    Senior roles signal strategic hiring direction (e.g., 'Head of Satellite Intelligence').
+    """
+    # Focus on senior/strategic roles to reduce noise
+    query = quote_plus(f'"{company}" chief OR director OR VP OR head OR president OR manager')
+    url = f"https://www.indeed.com/rss?q={query}&sort=date&fromage=1"
+    log.info("  Indeed RSS: %s", url)
+    try:
+        feed = feedparser.parse(url)
+    except Exception as exc:
+        log.error("Indeed RSS error for %s: %s", company, exc)
+        return []
+
+    articles = []
+    for entry in feed.entries:
+        pub_date = parse_pub_date(getattr(entry, "published", None))
+        if not is_within_window(pub_date, lookback_minutes):
+            continue
+        title = (entry.get("title") or "").strip()
+        # Filter: must mention company name in title to avoid false positives
+        if company.split()[0].lower() not in title.lower():
+            continue
+        articles.append({
+            "title": title,
+            "url": entry.get("link", ""),
+            "source": "Indeed Jobs",
+            "published_at": pub_date,
+            "origin": "indeed",
+            "signal_type": "job_posting",
+        })
+
+    log.info("  Indeed: %d relevant job postings for %s", len(articles), company)
     return articles
 
 
@@ -372,6 +427,10 @@ def get_signal_tag(article: dict) -> str:
         return "📢"
     if origin == "sec_edgar" or signal_type == "sec_filing":
         return "📋"
+    if origin == "linkedin" or signal_type == "linkedin":
+        return "🔗"
+    if origin == "indeed" or signal_type == "job_posting":
+        return "💼"
     if signal_type == "executive":
         return "👤"
     return "📰"
@@ -586,7 +645,11 @@ def main():
         raw.extend(fetch_google_rss_company(company, lookback_minutes))
         raw.extend(fetch_google_rss_exec(company, exec_titles, lookback_minutes))
 
-        # For digest only: job/appointment signals + PR Newswire + SEC EDGAR
+        # LinkedIn posts indexed by Google + Indeed job postings (both modes)
+        raw.extend(fetch_linkedin_via_google(company, lookback_minutes))
+        raw.extend(fetch_indeed_jobs(company, lookback_minutes))
+
+        # For digest only: appointment news + PR Newswire + SEC EDGAR
         if mode == "digest":
             raw.extend(fetch_google_rss_jobs(company, lookback_minutes))
             alias = aliases.get(company)
