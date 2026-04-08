@@ -1,0 +1,33 @@
+name: Industry News Monitor
+
+on:
+  schedule:
+    # Every 2 hours at :00 UTC (adjust to '0 * * * *' for hourly)
+    - cron: "0 */2 * * *"
+  # Allows manual trigger from the Actions tab for testing
+  workflow_dispatch:
+
+jobs:
+  fetch-industry-news:
+    name: Fetch industry news and post to Slack
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run industry news monitor
+        env:
+          SLACK_WEBHOOK_INDUSTRY: ${{ secrets.SLACK_WEBHOOK_INDUSTRY }}
+          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
+        run: python fetch_industry_news.py

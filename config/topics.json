@@ -1,0 +1,42 @@
+{
+  "topics": [
+    {
+      "id": "pulpwood",
+      "label": "Pulpwood",
+      "emoji": ":evergreen_tree:",
+      "queries": [
+        "pulpwood market",
+        "pulpwood prices timber",
+        "pulpwood supply demand forestry",
+        "softwood hardwood pulpwood"
+      ],
+      "pr_newswire_keywords": ["pulpwood", "pulp wood", "timber pulp"]
+    },
+    {
+      "id": "site_suitability",
+      "label": "Site Suitability",
+      "emoji": ":world_map:",
+      "queries": [
+        "site suitability forestry land",
+        "land suitability assessment agriculture",
+        "soil suitability crop production mapping",
+        "GIS site suitability forestry"
+      ],
+      "pr_newswire_keywords": ["site suitability", "land suitability", "soil suitability", "land assessment"]
+    },
+    {
+      "id": "vegetation_management",
+      "label": "Vegetation Management",
+      "emoji": ":herb:",
+      "queries": [
+        "vegetation management herbicide",
+        "vegetation management utility right-of-way",
+        "invasive species vegetation control forestry",
+        "vegetation management contract bidding"
+      ],
+      "pr_newswire_keywords": ["vegetation management", "invasive species control", "herbicide vegetation", "right-of-way vegetation"]
+    }
+  ],
+  "max_articles_per_topic": 5,
+  "lookback_minutes": 125
+}

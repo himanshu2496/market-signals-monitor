@@ -1,0 +1,35 @@
+{
+  "lookback": {
+    "alert_minutes": 125,
+    "digest_hours": 26
+  },
+  "limits": {
+    "max_articles_per_company_alert": 5,
+    "max_articles_per_company_digest": 3,
+    "max_industry_articles_per_topic": 5,
+    "newsapi_page_size": 5,
+    "google_news_max_results": 15,
+    "edgar_max_filings_per_company": 3
+  },
+  "sources": {
+    "google_news_base": "https://news.google.com/rss/search",
+    "newsapi_base": "https://newsapi.org/v2/everything",
+    "prnewswire_rss": "https://www.prnewswire.com/rss/news-releases-list.rss",
+    "edgar_efts_base": "https://efts.sec.gov/LATEST/search-index",
+    "edgar_submissions_base": "https://data.sec.gov/submissions"
+  },
+  "edgar": {
+    "user_agent": "MarketSignalsBot/1.0 (himanshu@satsure.co)",
+    "forms_to_watch": ["8-K", "6-K", "20-F"],
+    "rate_limit_delay_seconds": 0.6
+  },
+  "slack": {
+    "max_blocks_per_message": 47,
+    "retry_on_http_error": true,
+    "retry_delay_seconds": 5
+  },
+  "http": {
+    "request_timeout_seconds": 15,
+    "user_agent": "MarketSignalsBot/1.0"
+  }
+}
