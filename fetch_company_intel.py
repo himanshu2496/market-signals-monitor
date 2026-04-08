@@ -6,9 +6,9 @@ Posts to #market-signals-intel via Slack Incoming Webhook.
 
 Modes:
   --mode alerts   Every 2 hours: priority tier (10 companies) only.
-                  Sources: Google News RSS + NewsAPI + LinkedIn (via Google) + Indeed RSS
+                  Sources: Google News RSS + NewsAPI + Adzuna Jobs (optional)
   --mode digest   Daily 9am UTC: all 60 companies.
-                  Sources: Google News RSS + NewsAPI + PR Newswire RSS + SEC EDGAR + LinkedIn + Indeed RSS
+                  Sources: Google News RSS + NewsAPI + PR Newswire RSS + SEC EDGAR + Adzuna Jobs (optional)
 
 Usage:
   python fetch_company_intel.py --mode alerts
@@ -133,85 +133,103 @@ def fetch_google_rss(query: str, lookback_minutes: int, max_results: int = 15) -
 
 
 def fetch_google_rss_company(company: str, lookback_minutes: int) -> list[dict]:
-    """News about a company's strategy, tech, and partnerships."""
-    query = f'"{company}" announcement OR strategy OR technology OR acquisition OR partnership OR satellite'
+    """General company news: strategy, technology, acquisitions, partnerships."""
+    # Use first word of company name as a broader fallback too
+    short_name = company.split()[0]
+    query = f'"{short_name}" announcement OR strategy OR technology OR acquisition OR partnership OR satellite OR invest'
     articles = fetch_google_rss(query, lookback_minutes)
     for a in articles:
         a["signal_type"] = "news"
+    log.info("  Company news: %d results for %s", len(articles), company)
     return articles
 
 
 def fetch_google_rss_exec(company: str, exec_titles: list[str], lookback_minutes: int) -> list[dict]:
-    """Surface executive mentions (including LinkedIn-indexed content via Google News)."""
-    titles_str = " OR ".join(f'"{t}"' for t in exec_titles[:6])
-    query = f'"{company}" {titles_str}'
+    """
+    Surface executive quotes, appointments, and LinkedIn-style announcements.
+    Google News indexes many LinkedIn exec posts when they gain traction.
+    Uses short company name for broader matching.
+    """
+    short_name = company.split()[0]
+    titles_str = " OR ".join(exec_titles[:6])
+    query = f'"{short_name}" {titles_str}'
     articles = fetch_google_rss(query, lookback_minutes)
     for a in articles:
         a["signal_type"] = "executive"
+    log.info("  Exec mentions: %d results for %s", len(articles), company)
     return articles
 
 
 def fetch_google_rss_jobs(company: str, lookback_minutes: int) -> list[dict]:
-    """Hiring signals that reveal strategic direction."""
-    query = f'"{company}" hiring OR appointed OR "new role" OR "joins as" OR "named president" OR "named CEO"'
+    """
+    Strategic hiring signals from news coverage of job appointments.
+    Covers both formal press releases and LinkedIn-style announcements
+    that get picked up by news outlets.
+    """
+    short_name = company.split()[0]
+    query = f'"{short_name}" appointed OR "joins as" OR "named chief" OR "named president" OR "promoted to" OR "new head of" OR "new VP"'
     articles = fetch_google_rss(query, lookback_minutes)
     for a in articles:
-        a["signal_type"] = "executive"
+        a["signal_type"] = "job_posting"
+    log.info("  Hiring signals: %d results for %s", len(articles), company)
     return articles
 
 
-def fetch_linkedin_via_google(company: str, lookback_minutes: int) -> list[dict]:
+def fetch_adzuna_jobs(
+    company: str,
+    lookback_minutes: int,
+    app_id: str,
+    api_key: str,
+    country: str = "us",
+    timeout: int = 15,
+) -> list[dict]:
     """
-    Surface LinkedIn posts and articles indexed by Google News.
-    Uses site:linkedin.com to narrow results to LinkedIn content.
-    Note: only publicly visible LinkedIn posts appear in Google's index.
+    Fetch senior job postings from Adzuna API (free tier: 500 req/day).
+    Only called if ADZUNA_APP_ID and ADZUNA_API_KEY are set.
+    Register free at: https://developer.adzuna.com
     """
-    # Exec posts and company page updates on LinkedIn
-    query = f'"{company}" site:linkedin.com'
-    articles = fetch_google_rss(query, lookback_minutes)
-    for a in articles:
-        a["signal_type"] = "linkedin"
-        a["origin"] = "linkedin"
-        a["source"] = "LinkedIn"
-    log.info("  LinkedIn (Google-indexed): %d results for %s", len(articles), company)
-    return articles
+    if not app_id or not api_key:
+        return []
 
+    short_name = company.split()[0]
+    params = {
+        "app_id": app_id,
+        "app_key": api_key,
+        "results_per_page": 5,
+        "what": f"{short_name} director OR VP OR chief OR head OR president",
+        "sort_by": "date",
+        "max_days_old": max(1, lookback_minutes // (60 * 24)),
+    }
+    url = f"https://api.adzuna.com/v1/api/jobs/{country}/search/1"
+    log.debug("Adzuna: %s", url)
 
-def fetch_indeed_jobs(company: str, lookback_minutes: int, timeout: int = 15) -> list[dict]:
-    """
-    Fetch recent job postings from Indeed RSS for a company.
-    Indeed RSS: https://www.indeed.com/rss?q={query}&sort=date
-    Senior roles signal strategic hiring direction (e.g., 'Head of Satellite Intelligence').
-    """
-    # Focus on senior/strategic roles to reduce noise
-    query = quote_plus(f'"{company}" chief OR director OR VP OR head OR president OR manager')
-    url = f"https://www.indeed.com/rss?q={query}&sort=date&fromage=1"
-    log.info("  Indeed RSS: %s", url)
     try:
-        feed = feedparser.parse(url)
+        resp = requests.get(url, params=params, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as exc:
-        log.error("Indeed RSS error for %s: %s", company, exc)
+        log.error("Adzuna error for %s: %s", company, exc)
         return []
 
     articles = []
-    for entry in feed.entries:
-        pub_date = parse_pub_date(getattr(entry, "published", None))
+    for item in data.get("results", []):
+        created = item.get("created")
+        pub_date = parse_pub_date(created)
         if not is_within_window(pub_date, lookback_minutes):
             continue
-        title = (entry.get("title") or "").strip()
-        # Filter: must mention company name in title to avoid false positives
-        if company.split()[0].lower() not in title.lower():
-            continue
+        title = (item.get("title") or "").strip()
+        redirect_url = item.get("redirect_url", "")
+        company_name = item.get("company", {}).get("display_name", "")
         articles.append({
-            "title": title,
-            "url": entry.get("link", ""),
-            "source": "Indeed Jobs",
+            "title": f"[JOB] {title} @ {company_name}",
+            "url": redirect_url,
+            "source": "Adzuna",
             "published_at": pub_date,
-            "origin": "indeed",
+            "origin": "adzuna",
             "signal_type": "job_posting",
         })
 
-    log.info("  Indeed: %d relevant job postings for %s", len(articles), company)
+    log.info("  Adzuna jobs: %d results for %s", len(articles), company)
     return articles
 
 
@@ -275,11 +293,14 @@ def fetch_newsapi_batch(
             title = (item.get("title") or "").strip()
             url = item.get("url", "")
             source_name = item.get("source", {}).get("name", "NewsAPI")
-            title_lower = title.lower()
+            description = (item.get("description") or "").strip()
+            search_text = (title + " " + description).lower()
 
             # Attribute article to the most relevant company in the batch
             for company, alias in zip(batch, terms):
-                if alias.lower() in title_lower or company.lower() in title_lower:
+                # Match on alias, full name, or short first word of company name
+                short = company.split()[0].lower()
+                if alias.lower() in search_text or company.lower() in search_text or short in search_text:
                     results[company].append({
                         "title": title,
                         "url": url,
@@ -592,6 +613,8 @@ def main():
 
     slack_webhook = os.environ.get("SLACK_WEBHOOK_INTEL", "").strip()
     news_api_key = os.environ.get("NEWS_API_KEY", "").strip()
+    adzuna_app_id = os.environ.get("ADZUNA_APP_ID", "").strip()
+    adzuna_api_key = os.environ.get("ADZUNA_API_KEY", "").strip()
 
     if not slack_webhook:
         log.error("SLACK_WEBHOOK_INTEL is not set. Aborting.")
@@ -641,17 +664,16 @@ def main():
         log.info("--- Company: %s ---", company)
         raw: list[dict] = []
 
-        # Google News RSS: company news + exec mentions
+        # Google News RSS: company news + exec mentions + hiring signals (all modes)
         raw.extend(fetch_google_rss_company(company, lookback_minutes))
         raw.extend(fetch_google_rss_exec(company, exec_titles, lookback_minutes))
+        raw.extend(fetch_google_rss_jobs(company, lookback_minutes))
 
-        # LinkedIn posts indexed by Google + Indeed job postings (both modes)
-        raw.extend(fetch_linkedin_via_google(company, lookback_minutes))
-        raw.extend(fetch_indeed_jobs(company, lookback_minutes))
+        # Adzuna job postings (if credentials set)
+        raw.extend(fetch_adzuna_jobs(company, lookback_minutes, adzuna_app_id, adzuna_api_key))
 
-        # For digest only: appointment news + PR Newswire + SEC EDGAR
+        # For digest only: PR Newswire + SEC EDGAR
         if mode == "digest":
-            raw.extend(fetch_google_rss_jobs(company, lookback_minutes))
             alias = aliases.get(company)
             raw.extend(filter_pr_for_company(pr_articles, company, alias))
             if company in edgar_ciks:
