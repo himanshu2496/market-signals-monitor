@@ -2,10 +2,8 @@
 """
 gsheets.py — Google Sheets writer for Market Signals.
 
-Exports action bullets and raw article data to a Google Sheet.
-Sheet is created automatically if it doesn't exist.
-
-Requires GOOGLE_SERVICE_ACCOUNT_JSON env var (JSON string of service account credentials).
+Auto-creates the spreadsheet on first run and shares it so the owner can see it.
+Requires GOOGLE_SERVICE_ACCOUNT_JSON env var.
 """
 from __future__ import annotations
 
@@ -32,41 +30,51 @@ def _creds():
         info = json.loads(raw)
         return Credentials.from_service_account_info(info, scopes=SCOPES)
     except Exception as exc:
-        log.error("Failed to load service account credentials: %s", exc)
+        log.error("Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: %s", exc)
         return None
 
 
-def _get_or_create_spreadsheet(drive_svc, sheets_svc, sheet_name: str, tabs: list) -> Optional[str]:
-    """Return spreadsheet ID, creating it if necessary."""
+def _find_existing(drive_svc, sheet_name: str) -> Optional[str]:
+    """Return spreadsheet ID if a sheet with this name already exists in service account Drive."""
     try:
         results = drive_svc.files().list(
             q=f"name='{sheet_name}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
-            fields="files(id, name)",
+            fields="files(id)",
             pageSize=1,
         ).execute()
         files = results.get("files", [])
-        if files:
-            return files[0]["id"]
+        return files[0]["id"] if files else None
     except Exception as exc:
-        log.error("Drive search failed: %s", exc)
+        log.warning("Drive search failed (Drive API may not be enabled): %s", exc)
         return None
 
+
+def _create_spreadsheet(sheets_svc, sheet_name: str, tabs: list) -> Optional[str]:
     try:
         body = {
             "properties": {"title": sheet_name},
-            "sheets": [{"properties": {"title": tab}} for tab in tabs],
+            "sheets": [{"properties": {"title": t}} for t in tabs],
         }
         result = sheets_svc.spreadsheets().create(body=body, fields="spreadsheetId").execute()
-        spreadsheet_id = result["spreadsheetId"]
-        log.info("Created spreadsheet '%s' (%s)", sheet_name, spreadsheet_id)
-        return spreadsheet_id
+        return result["spreadsheetId"]
     except Exception as exc:
         log.error("Failed to create spreadsheet: %s", exc)
         return None
 
 
+def _share_anyone_with_link(drive_svc, spreadsheet_id: str):
+    """Make the sheet readable by anyone with the link so the owner can find it."""
+    try:
+        drive_svc.permissions().create(
+            fileId=spreadsheet_id,
+            body={"type": "anyone", "role": "writer"},
+            fields="id",
+        ).execute()
+    except Exception as exc:
+        log.warning("Could not share spreadsheet: %s", exc)
+
+
 def _ensure_tab(sheets_svc, spreadsheet_id: str, tab_name: str):
-    """Add tab if it doesn't already exist."""
     try:
         meta = sheets_svc.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         existing = [s["properties"]["title"] for s in meta["sheets"]]
@@ -75,20 +83,18 @@ def _ensure_tab(sheets_svc, spreadsheet_id: str, tab_name: str):
             sheets_svc.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id, body=body
             ).execute()
-            log.info("Created tab '%s'", tab_name)
     except Exception as exc:
         log.error("Failed to ensure tab '%s': %s", tab_name, exc)
 
 
 def _append_rows(sheets_svc, spreadsheet_id: str, tab: str, rows: list):
     try:
-        body = {"values": rows}
         sheets_svc.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
             range=f"'{tab}'!A1",
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
-            body=body,
+            body={"values": rows},
         ).execute()
     except Exception as exc:
         log.error("Failed to append to '%s': %s", tab, exc)
@@ -101,12 +107,15 @@ def write_to_sheets(
     summary: Optional[str],
     articles: list,
     source_label: str = "",
-):
-    """Write action bullets and articles to Google Sheets. No-op if credentials missing."""
+) -> Optional[str]:
+    """
+    Write data to Google Sheets. Returns the sheet URL if the sheet was newly created,
+    None otherwise.
+    """
     creds = _creds()
     if not creds:
         log.warning("GOOGLE_SERVICE_ACCOUNT_JSON not set — skipping Sheets export.")
-        return
+        return None
 
     try:
         from googleapiclient.discovery import build
@@ -114,16 +123,23 @@ def write_to_sheets(
         sheets_svc = build("sheets", "v4", credentials=creds)
     except ImportError:
         log.error("google-api-python-client not installed.")
-        return
+        return None
 
-    spreadsheet_id = _get_or_create_spreadsheet(
-        drive_svc, sheets_svc, sheet_name, [bullets_tab, articles_tab]
-    )
+    newly_created = False
+    spreadsheet_id = _find_existing(drive_svc, sheet_name)
+
     if not spreadsheet_id:
-        return
-
-    _ensure_tab(sheets_svc, spreadsheet_id, bullets_tab)
-    _ensure_tab(sheets_svc, spreadsheet_id, articles_tab)
+        spreadsheet_id = _create_spreadsheet(sheets_svc, sheet_name, [bullets_tab, articles_tab])
+        if not spreadsheet_id:
+            return None
+        newly_created = True
+        _share_anyone_with_link(drive_svc, spreadsheet_id)
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        log.info("*** NEW SHEET CREATED: %s ***", sheet_url)
+    else:
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        _ensure_tab(sheets_svc, spreadsheet_id, bullets_tab)
+        _ensure_tab(sheets_svc, spreadsheet_id, articles_tab)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -148,3 +164,5 @@ def write_to_sheets(
         ]
         _append_rows(sheets_svc, spreadsheet_id, articles_tab, rows)
         log.info("Wrote %d articles to Sheets.", len(rows))
+
+    return sheet_url if newly_created else None
