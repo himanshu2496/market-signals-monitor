@@ -5,38 +5,33 @@
       "label": "Pulpwood",
       "emoji": ":evergreen_tree:",
       "queries": [
-        "pulpwood market",
-        "pulpwood prices timber",
+        "pulpwood market prices",
         "pulpwood supply demand forestry",
-        "softwood hardwood pulpwood"
+        "timber pulpwood industry"
       ],
-      "pr_newswire_keywords": ["pulpwood", "pulp wood", "timber pulp"]
+      "pr_keywords": ["pulpwood", "pulp wood", "timber pulp"]
     },
     {
       "id": "site_suitability",
       "label": "Site Suitability",
       "emoji": ":world_map:",
       "queries": [
-        "site suitability forestry land",
-        "land suitability assessment agriculture",
-        "soil suitability crop production mapping",
-        "GIS site suitability forestry"
+        "site suitability forestry land assessment",
+        "land suitability agriculture mapping GIS",
+        "forest site suitability analysis"
       ],
-      "pr_newswire_keywords": ["site suitability", "land suitability", "soil suitability", "land assessment"]
+      "pr_keywords": ["site suitability", "land suitability", "soil suitability"]
     },
     {
       "id": "vegetation_management",
       "label": "Vegetation Management",
       "emoji": ":herb:",
       "queries": [
-        "vegetation management herbicide",
-        "vegetation management utility right-of-way",
-        "invasive species vegetation control forestry",
-        "vegetation management contract bidding"
+        "vegetation management forestry herbicide",
+        "invasive species vegetation control",
+        "vegetation management utility right-of-way"
       ],
-      "pr_newswire_keywords": ["vegetation management", "invasive species control", "herbicide vegetation", "right-of-way vegetation"]
+      "pr_keywords": ["vegetation management", "invasive species control", "right-of-way vegetation"]
     }
-  ],
-  "max_articles_per_topic": 5,
-  "lookback_minutes": 125
+  ]
 }

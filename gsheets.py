@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """
-gsheets.py
-Google Sheets writer for Market Signals.
+gsheets.py — Google Sheets writer for Market Signals.
 
-Automatically creates a spreadsheet named "Market Signals" on first run
-(owned by the service account), then appends rows to two tabs:
-  - "Action Bullets"  — one row per run: timestamp + AI-generated bullets
-  - "Articles"        — one row per article: date, company, title, URL, source,
-                        relevance score, relevance reason
+Exports action bullets and raw article data to a Google Sheet.
+Sheet is created automatically if it doesn't exist.
 
-The spreadsheet ID is printed to logs on creation so you can find it at:
-  https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}
-
-To share the sheet with yourself:
-  Open the URL above → Share → add your email
-
-Requires:
-  - GOOGLE_SERVICE_ACCOUNT_JSON env var (full JSON contents of service account key)
+Requires GOOGLE_SERVICE_ACCOUNT_JSON env var (JSON string of service account credentials).
 """
-
 from __future__ import annotations
 
 import json
@@ -29,208 +17,134 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-SPREADSHEET_NAME = "Market Signals"
-BULLETS_SHEET = "Action Bullets"
-ARTICLES_SHEET = "Articles"
-
-BULLETS_HEADERS = ["Timestamp (UTC)", "Mode", "Bullet Points"]
-ARTICLES_HEADERS = [
-    "Timestamp (UTC)", "Company", "Title", "URL",
-    "Source", "Signal Type", "Relevance Score", "Relevance Reason", "Published At",
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 
-def _get_service():
-    """
-    Return an authenticated Google Sheets + Drive service tuple, or (None, None).
-    Reads credentials from GOOGLE_SERVICE_ACCOUNT_JSON env var.
-    """
+def _creds():
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw:
-        log.warning("GOOGLE_SERVICE_ACCOUNT_JSON not set — skipping Google Sheets export.")
-        return None, None
-
+        return None
     try:
         from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-
-        creds_dict = json.loads(raw)
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        sheets = build("sheets", "v4", credentials=creds)
-        drive = build("drive", "v3", credentials=creds)
-        return sheets, drive
-    except ImportError:
-        log.error("google-api-python-client not installed. Run: pip install google-api-python-client google-auth")
-        return None, None
+        info = json.loads(raw)
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
     except Exception as exc:
-        log.error("Failed to initialise Google Sheets service: %s", exc)
-        return None, None
+        log.error("Failed to load service account credentials: %s", exc)
+        return None
 
 
-def _get_or_create_spreadsheet(sheets, drive) -> Optional[str]:
-    """
-    Find existing 'Market Signals' spreadsheet or create a new one.
-    Returns the spreadsheet ID.
-    """
-    # Search Drive for existing sheet
+def _get_or_create_spreadsheet(drive_svc, sheets_svc, sheet_name: str, tabs: list) -> Optional[str]:
+    """Return spreadsheet ID, creating it if necessary."""
     try:
-        results = drive.files().list(
-            q=f"name='{SPREADSHEET_NAME}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+        results = drive_svc.files().list(
+            q=f"name='{sheet_name}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
             fields="files(id, name)",
+            pageSize=1,
         ).execute()
         files = results.get("files", [])
         if files:
-            sheet_id = files[0]["id"]
-            log.info("Found existing spreadsheet: %s", sheet_id)
-            return sheet_id
+            return files[0]["id"]
     except Exception as exc:
         log.error("Drive search failed: %s", exc)
         return None
 
-    # Create new spreadsheet with both tabs
     try:
         body = {
-            "properties": {"title": SPREADSHEET_NAME},
-            "sheets": [
-                {"properties": {"title": BULLETS_SHEET}},
-                {"properties": {"title": ARTICLES_SHEET}},
-            ],
+            "properties": {"title": sheet_name},
+            "sheets": [{"properties": {"title": tab}} for tab in tabs],
         }
-        result = sheets.spreadsheets().create(body=body).execute()
-        sheet_id = result["spreadsheetId"]
-        log.info(
-            "Created new spreadsheet: https://docs.google.com/spreadsheets/d/%s",
-            sheet_id,
-        )
-
-        # Write headers to both tabs
-        sheets.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range=f"{BULLETS_SHEET}!A1",
-            valueInputOption="RAW",
-            body={"values": [BULLETS_HEADERS]},
-        ).execute()
-        sheets.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range=f"{ARTICLES_SHEET}!A1",
-            valueInputOption="RAW",
-            body={"values": [ARTICLES_HEADERS]},
-        ).execute()
-
-        # Bold the header rows
-        sheet_meta = sheets.spreadsheets().get(spreadsheetId=sheet_id).execute()
-        tab_ids = {s["properties"]["title"]: s["properties"]["sheetId"]
-                   for s in sheet_meta["sheets"]}
-        requests = []
-        for tab_name in [BULLETS_SHEET, ARTICLES_SHEET]:
-            requests.append({
-                "repeatCell": {
-                    "range": {
-                        "sheetId": tab_ids[tab_name],
-                        "startRowIndex": 0,
-                        "endRowIndex": 1,
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "textFormat": {"bold": True},
-                            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
-                            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
-                        }
-                    },
-                    "fields": "userEnteredFormat(textFormat,backgroundColor)",
-                }
-            })
-        sheets.spreadsheets().batchUpdate(
-            spreadsheetId=sheet_id,
-            body={"requests": requests},
-        ).execute()
-
-        return sheet_id
+        result = sheets_svc.spreadsheets().create(body=body, fields="spreadsheetId").execute()
+        spreadsheet_id = result["spreadsheetId"]
+        log.info("Created spreadsheet '%s' (%s)", sheet_name, spreadsheet_id)
+        return spreadsheet_id
     except Exception as exc:
         log.error("Failed to create spreadsheet: %s", exc)
         return None
 
 
-def append_bullets(summary: str, mode: str) -> bool:
-    """
-    Append one row to the 'Action Bullets' tab.
-    Returns True on success.
-    """
-    sheets, drive = _get_service()
-    if sheets is None:
-        return False
+def _ensure_tab(sheets_svc, spreadsheet_id: str, tab_name: str):
+    """Add tab if it doesn't already exist."""
+    try:
+        meta = sheets_svc.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        existing = [s["properties"]["title"] for s in meta["sheets"]]
+        if tab_name not in existing:
+            body = {"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
+            sheets_svc.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=body
+            ).execute()
+            log.info("Created tab '%s'", tab_name)
+    except Exception as exc:
+        log.error("Failed to ensure tab '%s': %s", tab_name, exc)
 
-    sheet_id = _get_or_create_spreadsheet(sheets, drive)
-    if sheet_id is None:
-        return False
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    row = [now, mode.upper(), summary]
+def _append_rows(sheets_svc, spreadsheet_id: str, tab: str, rows: list):
+    try:
+        body = {"values": rows}
+        sheets_svc.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{tab}'!A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body=body,
+        ).execute()
+    except Exception as exc:
+        log.error("Failed to append to '%s': %s", tab, exc)
+
+
+def write_to_sheets(
+    sheet_name: str,
+    bullets_tab: str,
+    articles_tab: str,
+    summary: Optional[str],
+    articles: list,
+    source_label: str = "",
+):
+    """Write action bullets and articles to Google Sheets. No-op if credentials missing."""
+    creds = _creds()
+    if not creds:
+        log.warning("GOOGLE_SERVICE_ACCOUNT_JSON not set — skipping Sheets export.")
+        return
 
     try:
-        sheets.spreadsheets().values().append(
-            spreadsheetId=sheet_id,
-            range=f"{BULLETS_SHEET}!A1",
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [row]},
-        ).execute()
-        log.info("Appended action bullets to Google Sheet.")
-        return True
-    except Exception as exc:
-        log.error("Failed to append bullets: %s", exc)
-        return False
+        from googleapiclient.discovery import build
+        drive_svc = build("drive", "v3", credentials=creds)
+        sheets_svc = build("sheets", "v4", credentials=creds)
+    except ImportError:
+        log.error("google-api-python-client not installed.")
+        return
 
+    spreadsheet_id = _get_or_create_spreadsheet(
+        drive_svc, sheets_svc, sheet_name, [bullets_tab, articles_tab]
+    )
+    if not spreadsheet_id:
+        return
 
-def append_articles(company_results: list, mode: str) -> bool:
-    """
-    Append one row per article to the 'Articles' tab.
-    company_results: list of (company_name, articles_list) tuples.
-    Returns True on success.
-    """
-    sheets, drive = _get_service()
-    if sheets is None:
-        return False
-
-    sheet_id = _get_or_create_spreadsheet(sheets, drive)
-    if sheet_id is None:
-        return False
+    _ensure_tab(sheets_svc, spreadsheet_id, bullets_tab)
+    _ensure_tab(sheets_svc, spreadsheet_id, articles_tab)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    rows = []
-    for company, articles in company_results:
-        for article in articles:
-            pub_at = article.get("published_at")
-            pub_str = pub_at.strftime("%Y-%m-%d %H:%M UTC") if pub_at else ""
-            rows.append([
+
+    if summary:
+        _append_rows(sheets_svc, spreadsheet_id, bullets_tab, [[now, source_label, summary]])
+        log.info("Wrote action bullets to Sheets.")
+
+    if articles:
+        rows = [
+            [
                 now,
-                company,
-                article.get("title", ""),
-                article.get("url", ""),
-                article.get("source", ""),
-                article.get("signal_type", "news"),
-                article.get("relevance_score", ""),
-                article.get("relevance_reason", ""),
-                pub_str,
-            ])
-
-    if not rows:
-        return True
-
-    try:
-        sheets.spreadsheets().values().append(
-            spreadsheetId=sheet_id,
-            range=f"{ARTICLES_SHEET}!A1",
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": rows},
-        ).execute()
-        log.info("Appended %d article rows to Google Sheet.", len(rows))
-        return True
-    except Exception as exc:
-        log.error("Failed to append articles: %s", exc)
-        return False
+                source_label,
+                a.get("company", ""),
+                a.get("title", ""),
+                a.get("url", ""),
+                a.get("source", ""),
+                a.get("published", ""),
+                str(a.get("relevance_score", "")),
+                a.get("relevance_reason", ""),
+            ]
+            for a in articles
+        ]
+        _append_rows(sheets_svc, spreadsheet_id, articles_tab, rows)
+        log.info("Wrote %d articles to Sheets.", len(rows))

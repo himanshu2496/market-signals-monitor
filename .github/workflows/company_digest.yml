@@ -1,36 +1,24 @@
-name: Company Intelligence Daily Digest
+name: Company Intel Daily Digest
 
 on:
   schedule:
-    # Daily at 9:00 AM UTC
-    - cron: "0 9 * * *"
+    - cron: "0 9 * * *"   # daily at 9am UTC
   workflow_dispatch:
 
 jobs:
-  company-digest:
-    name: Fetch all company signals and post daily digest to Slack
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    timeout-minutes: 20
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run company daily digest
+      - run: pip install -r requirements.txt
+      - run: python fetch_company_intel.py --mode=digest
         env:
           SLACK_WEBHOOK_INTEL: ${{ secrets.SLACK_WEBHOOK_INTEL }}
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
-          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
-          ADZUNA_API_KEY: ${{ secrets.ADZUNA_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        run: python fetch_company_intel.py --mode digest
