@@ -1,6 +1,6 @@
 {
   "lookback": {
-    "alert_minutes": 125,
+    "alert_minutes": 370,
     "digest_hours": 26
   },
   "limits": {

@@ -27,7 +27,8 @@ from urllib.parse import quote_plus
 import feedparser
 import requests
 
-from ai_filter import filter_relevant_articles
+from ai_filter import filter_relevant_articles, generate_action_summary
+from gsheets import append_bullets, append_articles
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -298,6 +299,7 @@ def main():
     pr_articles = fetch_pr_newswire(pr_rss_url, lookback)
 
     all_blocks: list[dict] = []
+    all_relevant_by_topic: list = []
     topics_with_articles = 0
     total_articles = 0
 
@@ -327,6 +329,7 @@ def main():
             all_blocks.extend(topic_blocks)
             topics_with_articles += 1
             total_articles += min(len(relevant), max_per_topic)
+            all_relevant_by_topic.append((topic_label, relevant))
 
     if total_articles == 0:
         log.info(
@@ -334,6 +337,15 @@ def main():
             lookback,
         )
         return
+
+    # Write articles to Google Sheets
+    append_articles(all_relevant_by_topic, "industry")
+
+    # Generate and store action summary
+    all_articles_flat = [a for _, articles in all_relevant_by_topic for a in articles]
+    summary = generate_action_summary(all_articles_flat)
+    if summary:
+        append_bullets(summary, "industry")
 
     all_blocks.append(build_footer_block(total_articles, topics_with_articles))
     send_slack(slack_webhook, all_blocks, max_blocks)

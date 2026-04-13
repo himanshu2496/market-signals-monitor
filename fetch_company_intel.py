@@ -5,18 +5,23 @@ Monitors ~60 global agribusiness companies + their executives for strategic sign
 Posts to #market-signals-intel via Slack Incoming Webhook.
 
 Modes:
-  --mode alerts   Every 2 hours: priority tier (10 companies) only.
+  --mode alerts   Every 6 hours: priority tier (10 companies).
+                  Sends ONE AI-written summary to Slack (no raw article list).
                   Sources: Google News RSS + NewsAPI + Adzuna Jobs (optional)
   --mode digest   Daily 9am UTC: all 60 companies.
                   Sources: Google News RSS + NewsAPI + PR Newswire RSS + SEC EDGAR + Adzuna Jobs (optional)
+
+Both modes write to Google Sheets (Action Bullets + Articles tabs).
 
 Usage:
   python fetch_company_intel.py --mode alerts
   python fetch_company_intel.py --mode digest
 
 Environment variables required:
-  SLACK_WEBHOOK_INTEL  — Slack Incoming Webhook URL for #market-signals-intel
-  NEWS_API_KEY         — NewsAPI.org key (free tier: 100 req/day)
+  SLACK_WEBHOOK_INTEL           — Slack Incoming Webhook URL for #market-signals-intel
+  NEWS_API_KEY                  — NewsAPI.org key (free tier: 100 req/day)
+  GEMINI_API_KEY                — Google Gemini API key (free)
+  GOOGLE_SERVICE_ACCOUNT_JSON  — Full JSON of Google service account key (for Sheets)
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import feedparser
 import requests
 
 from ai_filter import filter_relevant_articles, generate_action_summary
+from gsheets import append_bullets, append_articles
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -750,28 +756,73 @@ def main():
 
         company_results.append((company, relevant))
 
-        # In alerts mode: post each company immediately as signals are found
-        if mode == "alerts":
-            blocks = build_alert_blocks(company, relevant, max_articles)
-            blocks.append(build_footer_block(mode))
-            send_slack(slack_webhook, blocks, max_blocks)
-
     if not company_results:
         log.info("No relevant signals found. No Slack message sent.")
         return
 
-    # In digest mode: send one consolidated message with action summary at top
-    if mode == "digest":
-        # Flatten all relevant articles for action summary generation
-        all_relevant = [a for _, articles in company_results for a in articles]
-        summary = generate_action_summary(all_relevant)
+    # Flatten all relevant articles for summary + sheets
+    all_relevant = [a for _, articles in company_results for a in articles]
 
-        blocks: list[dict] = []
+    # Always write raw articles to Google Sheets
+    append_articles(company_results, mode)
+
+    # Generate AI summary (used in both modes)
+    summary = generate_action_summary(all_relevant)
+    if summary:
+        append_bullets(summary, mode)
+
+    # ── ALERTS mode: one clean AI summary message, no raw article list ──
+    if mode == "alerts":
+        now_str = datetime.now(timezone.utc).strftime("%a %b %-d, %H:%M UTC")
+        signal_count = len(all_relevant)
+        company_count = len(company_results)
+
+        blocks: list = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"🎯 6-Hour Market Signal Summary — {now_str}",
+                    "emoji": True,
+                },
+            },
+            {"type": "divider"},
+        ]
+
+        if summary:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": summary},
+            })
+        else:
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"_{signal_count} signals found across {company_count} companies. AI summary unavailable — check logs._",
+                },
+            })
+
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": (
+                    f":robot_face: *Market Signals — Intel*   ·   {now_str}   ·   "
+                    f"{signal_count} signal{'s' if signal_count != 1 else ''} across "
+                    f"{company_count} companies   ·   _Full details in Google Sheets_"
+                ),
+            }],
+        })
+        send_slack(slack_webhook, blocks, max_blocks)
+
+    # ── DIGEST mode: summary at top + full article list below ──
+    elif mode == "digest":
+        blocks: list = []
         if summary:
             blocks.extend(build_action_summary_blocks(summary))
 
-        total_scanned = sum(len(articles) for _, articles in company_results)
-        # Add supporting signals header
         blocks.append({
             "type": "section",
             "text": {
@@ -780,7 +831,6 @@ def main():
             },
         })
         blocks.append({"type": "divider"})
-
         blocks.extend(build_digest_blocks(company_results, max_articles))
         blocks.append(build_footer_block(mode))
         send_slack(slack_webhook, blocks, max_blocks)
