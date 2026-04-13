@@ -494,15 +494,24 @@ def build_alert_blocks(company: str, articles: list[dict], max_articles: int) ->
         time_label = _time_ago(article["published_at"])
         url = article["url"]
         source = article["source"]
-
         reason = article.get("relevance_reason", "")
-        text = f"{tag} *<{url}|{title}>*\n_{source}_   ·   {time_label}"
-        if reason:
-            text += f"\n> _{reason}_"
 
+        # Title as its own section for visual weight
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": text},
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{tag}  *<{url}|{title}>*",
+            },
+        })
+
+        # Metadata + reason as a context block (smaller grey text)
+        context_text = f"*{source}*   ·   {time_label}"
+        if reason:
+            context_text += f"   ·   _{reason}_"
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": context_text}],
         })
 
     blocks.append({"type": "divider"})
@@ -578,12 +587,16 @@ def build_digest_blocks(
             source = article["source"]
 
             reason = article.get("relevance_reason", "")
-            text = f"  {tag} <{url}|{title}>\n  _{source}_   ·   {time_label}"
-            if reason:
-                text += f"\n  > _{reason}_"
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": text},
+                "text": {"type": "mrkdwn", "text": f"{tag}  <{url}|{title}>"},
+            })
+            context_text = f"*{source}*   ·   {time_label}"
+            if reason:
+                context_text += f"   ·   _{reason}_"
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": context_text}],
             })
 
         blocks.append({"type": "divider"})

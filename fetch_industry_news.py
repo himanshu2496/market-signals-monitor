@@ -216,12 +216,16 @@ def build_slack_blocks(
         origin_tag = "📢" if article.get("origin") == "prnewswire" else "📰"
 
         reason = article.get("relevance_reason", "")
-        text = f"{origin_tag} *<{url}|{title}>*\n_{source}_   ·   {time_label}"
-        if reason:
-            text += f"\n> _{reason}_"
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": text},
+            "text": {"type": "mrkdwn", "text": f"{origin_tag}  *<{url}|{title}>*"},
+        })
+        context_text = f"*{source}*   ·   {time_label}"
+        if reason:
+            context_text += f"   ·   _{reason}_"
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": context_text}],
         })
 
     blocks.append({"type": "divider"})
