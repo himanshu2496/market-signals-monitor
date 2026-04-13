@@ -14,6 +14,8 @@ Environment variables required:
                             kept for parity with fetch_company_intel.py)
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

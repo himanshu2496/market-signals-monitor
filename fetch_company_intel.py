@@ -19,6 +19,8 @@ Environment variables required:
   NEWS_API_KEY         — NewsAPI.org key (free tier: 100 req/day)
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging

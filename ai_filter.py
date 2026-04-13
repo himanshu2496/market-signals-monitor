@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ai_filter.py
-Claude-powered relevance filtering and action summary generation.
+Gemini-powered relevance filtering and action summary generation.
 
 Provides two functions:
   filter_relevant_articles() — scores articles 1-10 for business relevance,
@@ -9,13 +9,16 @@ Provides two functions:
   generate_action_summary()  — synthesizes high-relevance signals into a
                                concrete "what to act on" narrative for the team
 
-Both functions degrade gracefully: if ANTHROPIC_API_KEY is not set, articles
+Both functions degrade gracefully: if GEMINI_API_KEY is not set, articles
 pass through unfiltered and no summary is generated.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import os
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -38,29 +41,25 @@ We care deeply about:
 
 
 def _get_client():
-    """Return a Gemini GenerativeModel, or None if the key is not set."""
+    """Return a Gemini client, or None if the key is not set."""
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        return genai.GenerativeModel(
-            model_name=MODEL,
-            system_instruction=BUSINESS_CONTEXT,
-        )
+        from google import genai
+        return genai.Client(api_key=api_key)
     except ImportError:
-        log.error("google-generativeai package not installed. Run: pip install google-generativeai")
+        log.error("google-genai package not installed. Run: pip install google-genai")
         return None
 
 
-def filter_relevant_articles(articles: list[dict]) -> list[dict]:
+def filter_relevant_articles(articles: list) -> list:
     """
-    Score each article for business relevance using Claude.
+    Score each article for business relevance using Gemini.
     Returns only articles scoring >= MIN_RELEVANCE_SCORE, with
     'relevance_score' and 'relevance_reason' fields added.
 
-    If ANTHROPIC_API_KEY is not set, returns all articles unchanged.
+    If GEMINI_API_KEY is not set, returns all articles unchanged.
     """
     if not articles:
         return articles
@@ -76,7 +75,9 @@ def filter_relevant_articles(articles: list[dict]) -> list[dict]:
         for i, a in enumerate(articles)
     )
 
-    prompt = f"""Rate each article for relevance to our business on a scale of 1-10.
+    prompt = f"""{BUSINESS_CONTEXT}
+
+Rate each article for relevance to our business on a scale of 1-10.
 
 Scoring guide:
 - 8-10: Directly actionable — competitor move, market shift, tech investment, or exec change in our exact space
@@ -90,10 +91,13 @@ Articles:
 {article_list}"""
 
     try:
-        response = client.generate_content(prompt)
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+        )
         raw = response.text.strip()
 
-        # Strip markdown code fences if Claude wrapped the JSON
+        # Strip markdown code fences if Gemini wrapped the JSON
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -102,10 +106,10 @@ Articles:
 
         scores = json.loads(raw)
     except json.JSONDecodeError as exc:
-        log.error("Claude returned invalid JSON for relevance scoring: %s", exc)
+        log.error("Gemini returned invalid JSON for relevance scoring: %s", exc)
         return articles
     except Exception as exc:
-        log.error("Claude API error during relevance filtering: %s", exc)
+        log.error("Gemini API error during relevance filtering: %s", exc)
         return articles
 
     # Build a lookup from index → score/reason
@@ -116,7 +120,7 @@ Articles:
     for i, article in enumerate(articles):
         entry = score_map.get(i)
         if entry is None:
-            # Claude didn't score this article — include it conservatively
+            # Gemini didn't score this article — include it conservatively
             article["relevance_score"] = 5
             article["relevance_reason"] = "Not scored"
             kept.append(article)
@@ -141,7 +145,7 @@ Articles:
     return kept
 
 
-def generate_action_summary(articles: list[dict]) -> str | None:
+def generate_action_summary(articles: list) -> Optional[str]:
     """
     Generate a 3-5 bullet "what to act on" narrative from high-relevance articles.
     Returns a markdown string for inclusion in Slack, or None if generation fails
@@ -167,7 +171,9 @@ def generate_action_summary(articles: list[dict]) -> str | None:
 
     signals_text = "\n".join(signal_lines)
 
-    prompt = f"""Based on today's market signals below, write 3-5 concrete bullet points for our sales and strategy team.
+    prompt = f"""{BUSINESS_CONTEXT}
+
+Based on today's market signals below, write 3-5 concrete bullet points for our sales and strategy team.
 
 Rules:
 - Be specific: name companies, technologies, and trends
@@ -181,7 +187,10 @@ Market signals:
 Return only the bullet points, starting each with "•". No intro sentence, no conclusion."""
 
     try:
-        response = client.generate_content(prompt)
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+        )
         summary = response.text.strip()
         log.info("Action summary generated (%d chars).", len(summary))
         return summary
