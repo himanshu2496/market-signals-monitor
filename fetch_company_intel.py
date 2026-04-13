@@ -32,6 +32,8 @@ from urllib.parse import quote_plus
 import feedparser
 import requests
 
+from ai_filter import filter_relevant_articles, generate_action_summary
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -132,11 +134,19 @@ def fetch_google_rss(query: str, lookback_minutes: int, max_results: int = 15) -
     return articles
 
 
-def fetch_google_rss_company(company: str, lookback_minutes: int) -> list[dict]:
+def _search_name(company: str, aliases: dict) -> str:
+    """
+    Return the best search term for a company name.
+    Uses alias if defined, otherwise uses the full company name.
+    Never splits on spaces — avoids "John" matching for "John Deere".
+    """
+    return aliases.get(company, company)
+
+
+def fetch_google_rss_company(company: str, aliases: dict, lookback_minutes: int) -> list[dict]:
     """General company news: strategy, technology, acquisitions, partnerships."""
-    # Use first word of company name as a broader fallback too
-    short_name = company.split()[0]
-    query = f'"{short_name}" announcement OR strategy OR technology OR acquisition OR partnership OR satellite OR invest'
+    name = _search_name(company, aliases)
+    query = f'"{name}" announcement OR strategy OR technology OR acquisition OR partnership OR satellite OR invest'
     articles = fetch_google_rss(query, lookback_minutes)
     for a in articles:
         a["signal_type"] = "news"
@@ -144,15 +154,14 @@ def fetch_google_rss_company(company: str, lookback_minutes: int) -> list[dict]:
     return articles
 
 
-def fetch_google_rss_exec(company: str, exec_titles: list[str], lookback_minutes: int) -> list[dict]:
+def fetch_google_rss_exec(company: str, aliases: dict, exec_titles: list[str], lookback_minutes: int) -> list[dict]:
     """
-    Surface executive quotes, appointments, and LinkedIn-style announcements.
+    Surface executive quotes and appointments.
     Google News indexes many LinkedIn exec posts when they gain traction.
-    Uses short company name for broader matching.
     """
-    short_name = company.split()[0]
+    name = _search_name(company, aliases)
     titles_str = " OR ".join(exec_titles[:6])
-    query = f'"{short_name}" {titles_str}'
+    query = f'"{name}" {titles_str}'
     articles = fetch_google_rss(query, lookback_minutes)
     for a in articles:
         a["signal_type"] = "executive"
@@ -160,14 +169,10 @@ def fetch_google_rss_exec(company: str, exec_titles: list[str], lookback_minutes
     return articles
 
 
-def fetch_google_rss_jobs(company: str, lookback_minutes: int) -> list[dict]:
-    """
-    Strategic hiring signals from news coverage of job appointments.
-    Covers both formal press releases and LinkedIn-style announcements
-    that get picked up by news outlets.
-    """
-    short_name = company.split()[0]
-    query = f'"{short_name}" appointed OR "joins as" OR "named chief" OR "named president" OR "promoted to" OR "new head of" OR "new VP"'
+def fetch_google_rss_jobs(company: str, aliases: dict, lookback_minutes: int) -> list[dict]:
+    """Strategic hiring signals from news coverage of job appointments."""
+    name = _search_name(company, aliases)
+    query = f'"{name}" appointed OR "joins as" OR "named chief" OR "named president" OR "promoted to" OR "new head of" OR "new VP"'
     articles = fetch_google_rss(query, lookback_minutes)
     for a in articles:
         a["signal_type"] = "job_posting"
@@ -177,6 +182,7 @@ def fetch_google_rss_jobs(company: str, lookback_minutes: int) -> list[dict]:
 
 def fetch_adzuna_jobs(
     company: str,
+    aliases: dict,
     lookback_minutes: int,
     app_id: str,
     api_key: str,
@@ -191,12 +197,12 @@ def fetch_adzuna_jobs(
     if not app_id or not api_key:
         return []
 
-    short_name = company.split()[0]
+    name = _search_name(company, aliases)
     params = {
         "app_id": app_id,
         "app_key": api_key,
         "results_per_page": 5,
-        "what": f"{short_name} director OR VP OR chief OR head OR president",
+        "what": f'"{name}" director OR VP OR chief OR head OR president',
         "sort_by": "date",
         "max_days_old": max(1, lookback_minutes // (60 * 24)),
     }
@@ -297,10 +303,9 @@ def fetch_newsapi_batch(
             search_text = (title + " " + description).lower()
 
             # Attribute article to the most relevant company in the batch
+            # Match only on alias or full company name — never on split first word
             for company, alias in zip(batch, terms):
-                # Match on alias, full name, or short first word of company name
-                short = company.split()[0].lower()
-                if alias.lower() in search_text or company.lower() in search_text or short in search_text:
+                if alias.lower() in search_text or company.lower() in search_text:
                     results[company].append({
                         "title": title,
                         "url": url,
@@ -488,16 +493,38 @@ def build_alert_blocks(company: str, articles: list[dict], max_articles: int) ->
         url = article["url"]
         source = article["source"]
 
+        reason = article.get("relevance_reason", "")
+        text = f"{tag} *<{url}|{title}>*\n_{source}_   ·   {time_label}"
+        if reason:
+            text += f"\n> _{reason}_"
+
         blocks.append({
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"{tag} *<{url}|{title}>*\n_{source}_   ·   {time_label}",
-            },
+            "text": {"type": "mrkdwn", "text": text},
         })
 
     blocks.append({"type": "divider"})
     return blocks
+
+
+def build_action_summary_blocks(summary: str) -> list[dict]:
+    """Top-of-digest block showing Claude's 'what to act on' bullets."""
+    now_str = datetime.now(timezone.utc).strftime("%a %b %-d")
+    return [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"🎯 What to act on — {now_str}",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": summary},
+        },
+        {"type": "divider"},
+    ]
 
 
 def build_digest_blocks(
@@ -548,12 +575,13 @@ def build_digest_blocks(
             url = article["url"]
             source = article["source"]
 
+            reason = article.get("relevance_reason", "")
+            text = f"  {tag} <{url}|{title}>\n  _{source}_   ·   {time_label}"
+            if reason:
+                text += f"\n  > _{reason}_"
             blocks.append({
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"  {tag} <{url}|{title}>\n  _{source}_   ·   {time_label}",
-                },
+                "text": {"type": "mrkdwn", "text": text},
             })
 
         blocks.append({"type": "divider"})
@@ -665,12 +693,12 @@ def main():
         raw: list[dict] = []
 
         # Google News RSS: company news + exec mentions + hiring signals (all modes)
-        raw.extend(fetch_google_rss_company(company, lookback_minutes))
-        raw.extend(fetch_google_rss_exec(company, exec_titles, lookback_minutes))
-        raw.extend(fetch_google_rss_jobs(company, lookback_minutes))
+        raw.extend(fetch_google_rss_company(company, aliases, lookback_minutes))
+        raw.extend(fetch_google_rss_exec(company, aliases, exec_titles, lookback_minutes))
+        raw.extend(fetch_google_rss_jobs(company, aliases, lookback_minutes))
 
         # Adzuna job postings (if credentials set)
-        raw.extend(fetch_adzuna_jobs(company, lookback_minutes, adzuna_app_id, adzuna_api_key))
+        raw.extend(fetch_adzuna_jobs(company, aliases, lookback_minutes, adzuna_app_id, adzuna_api_key))
 
         # For digest only: PR Newswire + SEC EDGAR
         if mode == "digest":
@@ -693,26 +721,52 @@ def main():
         raw.extend(newsapi_results.get(company, []))
 
         unique = deduplicate(raw)
-        log.info("  %d unique articles", len(unique))
+        log.info("  %d unique articles before AI filter", len(unique))
 
         if not unique:
             continue
 
-        company_results.append((company, unique))
+        # AI relevance filter — keeps only articles scoring >= 6
+        relevant = filter_relevant_articles(unique)
+        log.info("  %d relevant articles after AI filter", len(relevant))
+
+        if not relevant:
+            continue
+
+        company_results.append((company, relevant))
 
         # In alerts mode: post each company immediately as signals are found
         if mode == "alerts":
-            blocks = build_alert_blocks(company, unique, max_articles)
+            blocks = build_alert_blocks(company, relevant, max_articles)
             blocks.append(build_footer_block(mode))
             send_slack(slack_webhook, blocks, max_blocks)
 
     if not company_results:
-        log.info("No new signals found. No Slack message sent.")
+        log.info("No relevant signals found. No Slack message sent.")
         return
 
-    # In digest mode: send one consolidated message for all companies
+    # In digest mode: send one consolidated message with action summary at top
     if mode == "digest":
-        blocks = build_digest_blocks(company_results, max_articles)
+        # Flatten all relevant articles for action summary generation
+        all_relevant = [a for _, articles in company_results for a in articles]
+        summary = generate_action_summary(all_relevant)
+
+        blocks: list[dict] = []
+        if summary:
+            blocks.extend(build_action_summary_blocks(summary))
+
+        total_scanned = sum(len(articles) for _, articles in company_results)
+        # Add supporting signals header
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Supporting signals — {len(all_relevant)} relevant signals across {len(company_results)} companies*",
+            },
+        })
+        blocks.append({"type": "divider"})
+
+        blocks.extend(build_digest_blocks(company_results, max_articles))
         blocks.append(build_footer_block(mode))
         send_slack(slack_webhook, blocks, max_blocks)
 

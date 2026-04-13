@@ -25,6 +25,8 @@ from urllib.parse import quote_plus
 import feedparser
 import requests
 
+from ai_filter import filter_relevant_articles
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -211,12 +213,13 @@ def build_slack_blocks(
         time_label = _time_ago(article["published_at"])
         origin_tag = "📢" if article.get("origin") == "prnewswire" else "📰"
 
+        reason = article.get("relevance_reason", "")
+        text = f"{origin_tag} *<{url}|{title}>*\n_{source}_   ·   {time_label}"
+        if reason:
+            text += f"\n> _{reason}_"
         blocks.append({
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"{origin_tag} *<{url}|{title}>*\n_{source}_   ·   {time_label}",
-            },
+            "text": {"type": "mrkdwn", "text": text},
         })
 
     blocks.append({"type": "divider"})
@@ -308,17 +311,20 @@ def main():
         raw.extend(pr_matched)
 
         unique = deduplicate(raw)
-        log.info("Topic '%s': %d unique articles after dedup", topic_label, len(unique))
+        log.info("Topic '%s': %d unique articles before AI filter", topic_label, len(unique))
 
-        if unique:
-            topic_blocks = build_slack_blocks(topic_label, emoji, unique, max_per_topic)
+        relevant = filter_relevant_articles(unique)
+        log.info("Topic '%s': %d relevant articles after AI filter", topic_label, len(relevant))
+
+        if relevant:
+            topic_blocks = build_slack_blocks(topic_label, emoji, relevant, max_per_topic)
             all_blocks.extend(topic_blocks)
             topics_with_articles += 1
-            total_articles += min(len(unique), max_per_topic)
+            total_articles += min(len(relevant), max_per_topic)
 
     if total_articles == 0:
         log.info(
-            "No new articles found in the last %d minutes. No Slack message sent.",
+            "No relevant articles found in the last %d minutes. No Slack message sent.",
             lookback,
         )
         return
