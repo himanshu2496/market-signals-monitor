@@ -20,7 +20,7 @@ import os
 log = logging.getLogger(__name__)
 
 MIN_RELEVANCE_SCORE = 6  # Articles scoring below this are filtered out
-MODEL = "claude-haiku-4-5-20251001"  # Fast + cheap for batch scoring
+MODEL = "gemini-2.0-flash"  # Free tier: 1,500 req/day, 1M tokens/day
 
 BUSINESS_CONTEXT = """You are a market intelligence analyst for SatSure, a company that sells:
 - Pulpwood and timber market intelligence (crop monitoring, yield forecasting)
@@ -38,15 +38,19 @@ We care deeply about:
 
 
 def _get_client():
-    """Return an Anthropic client, or None if the key is not set."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    """Return a Gemini GenerativeModel, or None if the key is not set."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
     try:
-        import anthropic
-        return anthropic.Anthropic(api_key=api_key)
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        return genai.GenerativeModel(
+            model_name=MODEL,
+            system_instruction=BUSINESS_CONTEXT,
+        )
     except ImportError:
-        log.error("anthropic package not installed. Run: pip install anthropic>=0.25.0")
+        log.error("google-generativeai package not installed. Run: pip install google-generativeai")
         return None
 
 
@@ -63,7 +67,7 @@ def filter_relevant_articles(articles: list[dict]) -> list[dict]:
 
     client = _get_client()
     if client is None:
-        log.warning("ANTHROPIC_API_KEY not set — skipping relevance filter, passing all %d articles.", len(articles))
+        log.warning("GEMINI_API_KEY not set — skipping relevance filter, passing all %d articles.", len(articles))
         return articles
 
     # Build a numbered list of article titles for the prompt
@@ -86,13 +90,8 @@ Articles:
 {article_list}"""
 
     try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            system=BUSINESS_CONTEXT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text.strip()
+        response = client.generate_content(prompt)
+        raw = response.text.strip()
 
         # Strip markdown code fences if Claude wrapped the JSON
         if raw.startswith("```"):
@@ -182,15 +181,10 @@ Market signals:
 Return only the bullet points, starting each with "•". No intro sentence, no conclusion."""
 
     try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=512,
-            system=BUSINESS_CONTEXT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        summary = response.content[0].text.strip()
+        response = client.generate_content(prompt)
+        summary = response.text.strip()
         log.info("Action summary generated (%d chars).", len(summary))
         return summary
     except Exception as exc:
-        log.error("Claude API error during action summary generation: %s", exc)
+        log.error("Gemini API error during action summary generation: %s", exc)
         return None
